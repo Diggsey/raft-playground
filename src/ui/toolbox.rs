@@ -59,15 +59,16 @@ pub fn gui(ui: &mut UiCell, node_id: NodeId, cluster_state: &mut ClusterState, a
         .set_opt(&mut toolbox.log_list_id, ui);
 
     while let Some(item) = widget::list::Items::next(&mut items, ui) {
-        let log_index = state.log.len() - item.i - 1;
-        let entry = &state.log[log_index];
-        let color = if log_index as u64 <= state.observed.committed_index.0 {
+        let index = state.log.len() - item.i - 1;
+        let log_index = state.compacted + index as u64;
+        let entry = &state.log[index];
+        let color = if log_index <= state.observed.committed_index {
             conrod_core::color::WHITE
         } else {
             Color::Rgba(1.0, 0.8, 0.4, 1.0)
         };
         item.set(
-            widget::Text::new(&format!("{}: {:?}\n", log_index, entry))
+            widget::Text::new(&format!("{}: {:?}\n", log_index.0, entry))
                 .color(color)
                 .font_size(font_size),
             ui,

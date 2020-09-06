@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -6,6 +7,7 @@ use act_zero::*;
 use futures::task::{FutureObj, Spawn, SpawnError};
 use raft_zero::messages::*;
 use raft_zero::*;
+use serde::{Deserialize, Serialize};
 use tokio::time::delay_for;
 
 use crate::state::*;
@@ -34,6 +36,12 @@ fn spawn_actor<A: Actor>(actor: A) -> Addr<Local<A>> {
 #[derive(Debug, Clone)]
 pub struct DummyLogData {
     pub msg: String,
+}
+
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+pub struct DummyState {
+    pub num_requests: u64,
+    pub membership: Membership,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +83,7 @@ impl Application for DummyApp {
     type LogData = DummyLogData;
     type LogResponse = DummyLogResponse;
     type LogError = ();
+    type SnapshotId = usize;
 
     fn config(&self) -> Arc<Config> {
         self.config.clone()
@@ -93,6 +102,30 @@ impl Application for DummyApp {
         ))
         .upcast()
     }
+}
+
+fn handle_client_response(
+    state: Arc<Mutex<ClusterState>>,
+    fut: impl Future<Output = Result<ClientResult<DummyApp>, Canceled>> + Send + 'static,
+) {
+    tokio::spawn(async move {
+        let resp = fut.await.ok();
+        state.lock().unwrap().responses.push(resp);
+    });
+}
+
+fn handle_message_response<R>(
+    to: NodeId,
+    from: NodeId,
+    state: Arc<Mutex<ClusterState>>,
+    fut: impl Future<Output = Result<R, Canceled>> + Send + 'static,
+    f: impl FnOnce(R) -> Message + Send + 'static,
+) {
+    tokio::spawn(async move {
+        if let Ok(resp) = fut.await {
+            state.lock().unwrap().send_message(to, from, f(resp));
+        }
+    });
 }
 
 #[tokio::main]
@@ -155,13 +188,8 @@ async fn background(state: Arc<Mutex<ClusterState>>) {
             match msg {
                 Message::VoteRequest(req, res) => {
                     let fut = node_actors[to.0 as usize].call_request_vote(req);
-                    tokio::spawn(async move {
-                        let resp = fut.await.unwrap();
-                        state.lock().unwrap().send_message(
-                            to,
-                            from,
-                            Message::VoteResponse(resp, res),
-                        );
+                    handle_message_response(to, from, state, fut, |resp| {
+                        Message::VoteResponse(resp, res)
                     });
                 }
                 Message::VoteResponse(resp, res) => {
@@ -169,38 +197,33 @@ async fn background(state: Arc<Mutex<ClusterState>>) {
                 }
                 Message::AppendEntriesRequest(req, res) => {
                     let fut = node_actors[to.0 as usize].call_append_entries(req);
-                    tokio::spawn(async move {
-                        let resp = fut.await.unwrap();
-                        state.lock().unwrap().send_message(
-                            to,
-                            from,
-                            Message::AppendEntriesResponse(resp, res),
-                        );
+                    handle_message_response(to, from, state, fut, |resp| {
+                        Message::AppendEntriesResponse(resp, res)
                     });
                 }
                 Message::AppendEntriesResponse(resp, res) => {
                     res.send(resp).ok();
                 }
+                Message::InstallSnapshotRequest(req, res) => {
+                    let fut = node_actors[to.0 as usize].call_install_snapshot(req);
+                    handle_message_response(to, from, state, fut, |resp| {
+                        Message::InstallSnapshotResponse(resp, res)
+                    });
+                }
+                Message::InstallSnapshotResponse(resp, res) => {
+                    res.send(resp).ok();
+                }
                 Message::ClientRequest(req) => {
                     let fut = node_actors[to.0 as usize].call_client_request(req);
-                    tokio::spawn(async move {
-                        let resp = fut.await.unwrap();
-                        state.lock().unwrap().responses.push(resp);
-                    });
+                    handle_client_response(state, fut);
                 }
                 Message::SetLearners(req) => {
                     let fut = node_actors[to.0 as usize].call_set_learners(req);
-                    tokio::spawn(async move {
-                        let resp = fut.await.unwrap();
-                        state.lock().unwrap().responses.push(resp);
-                    });
+                    handle_client_response(state, fut);
                 }
                 Message::SetMembers(req) => {
                     let fut = node_actors[to.0 as usize].call_set_members(req);
-                    tokio::spawn(async move {
-                        let resp = fut.await.unwrap();
-                        state.lock().unwrap().responses.push(resp);
-                    });
+                    handle_client_response(state, fut);
                 }
             }
         }

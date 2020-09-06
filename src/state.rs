@@ -1,13 +1,16 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::mem;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use act_zero::Sender;
 use conrod_core::widget::Id;
 use raft_zero::messages::*;
 use raft_zero::*;
+use tokio::io::AsyncWrite;
 
-use crate::background::{DummyApp, DummyLogData};
+use crate::background::{DummyApp, DummyLogData, DummyState};
 
 #[derive(Debug)]
 pub enum Message {
@@ -18,6 +21,8 @@ pub enum Message {
         Sender<AppendEntriesResponse>,
     ),
     AppendEntriesResponse(AppendEntriesResponse, Sender<AppendEntriesResponse>),
+    InstallSnapshotRequest(InstallSnapshotRequest, Sender<InstallSnapshotResponse>),
+    InstallSnapshotResponse(InstallSnapshotResponse, Sender<InstallSnapshotResponse>),
     ClientRequest(ClientRequest<DummyLogData>),
     SetMembers(SetMembersRequest),
     SetLearners(SetLearnersRequest),
@@ -37,6 +42,8 @@ impl Message {
             Self::AppendEntriesResponse(req, _) => {
                 format!("AppendEntriesResponse({})", req.success)
             }
+            Self::InstallSnapshotRequest(req, _) => format!("InstallSnapshotRequest({})", req.done),
+            Self::InstallSnapshotResponse(_req, _) => "InstallSnapshotResponse".into(),
             Self::ClientRequest(req) => format!("ClientRequest({:?})", req.data.msg),
             Self::SetMembers(req) => {
                 format!("SetMembers({}, {})", req.ids.len(), req.fault_tolerance)
@@ -59,11 +66,71 @@ pub struct InFlightMessage {
 #[derive(Debug, Clone)]
 pub struct NodeState {
     pub id: Option<Id>,
+    pub state: DummyState,
     pub log: Vec<Arc<Entry<DummyLogData>>>,
+    pub applied: LogIndex,
+    pub compacted: LogIndex,
     pub hs: HardState,
     pub observed: ObservedState,
     pub membership: Membership,
     pub timer_start: Instant,
+    pub snapshots: Vec<Option<Arc<[u8]>>>,
+    pub current_snapshot: usize,
+}
+
+pub struct SnapshotWriter {
+    state: Arc<Mutex<ClusterState>>,
+    node_index: usize,
+    snapshot_id: usize,
+    data: Vec<u8>,
+}
+
+impl SnapshotWriter {
+    pub fn new(state: Arc<Mutex<ClusterState>>, node_index: usize) -> Self {
+        let snapshot_id = {
+            let node_state = &mut state.lock().unwrap().nodes[node_index];
+            let snapshot_id = node_state.snapshots.len();
+            node_state.snapshots.push(None);
+            snapshot_id
+        };
+        Self {
+            state,
+            node_index,
+            snapshot_id,
+            data: Vec::new(),
+        }
+    }
+    pub fn id(&self) -> usize {
+        self.snapshot_id
+    }
+}
+
+impl AsyncWrite for SnapshotWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        Pin::new(&mut self.data).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.data).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        let this = &mut *self;
+        let res = Pin::new(&mut this.data).poll_shutdown(cx);
+        this.state.lock().unwrap().nodes[this.node_index].snapshots[this.snapshot_id] =
+            Some(mem::replace(&mut this.data, Vec::new()).into());
+        res
+    }
 }
 
 impl Default for NodeState {
@@ -74,10 +141,15 @@ impl Default for NodeState {
                 term: Term(0),
                 payload: EntryPayload::Blank,
             })],
+            state: Default::default(),
+            applied: LogIndex::ZERO,
             observed: ObservedState::default(),
             membership: Membership::default(),
             hs: HardState::default(),
             timer_start: Instant::now(),
+            snapshots: Vec::new(),
+            compacted: LogIndex::ZERO,
+            current_snapshot: 0,
         }
     }
 }
@@ -112,7 +184,7 @@ pub struct ClusterState {
     pub channels: HashMap<(NodeId, NodeId), ChannelState>,
     pub selected_index: usize,
     pub toolbox: Toolbox,
-    pub responses: Vec<ClientResult<DummyApp>>,
+    pub responses: Vec<Option<ClientResult<DummyApp>>>,
 }
 
 impl ClusterState {

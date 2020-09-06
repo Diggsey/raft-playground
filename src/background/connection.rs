@@ -43,9 +43,9 @@ impl Connection<DummyApp> for DummyConnection {
     }
     async fn install_snapshot(
         &self,
-        _req: InstallSnapshotRequest,
-        _res: Sender<InstallSnapshotResponse>,
+        req: InstallSnapshotRequest,
+        res: Sender<InstallSnapshotResponse>,
     ) {
-        unimplemented!()
+        self.send(Message::InstallSnapshotRequest(req, res));
     }
 }
