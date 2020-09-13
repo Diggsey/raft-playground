@@ -34,6 +34,9 @@ impl Connection<DummyApp> for DummyConnection {
     async fn request_vote(&self, req: VoteRequest, res: Sender<VoteResponse>) {
         self.send(Message::VoteRequest(req, res));
     }
+    async fn request_pre_vote(&self, req: PreVoteRequest, res: Sender<PreVoteResponse>) {
+        self.send(Message::PreVoteRequest(req, res));
+    }
     async fn append_entries(
         &self,
         req: AppendEntriesRequest<DummyApp>,

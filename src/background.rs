@@ -195,6 +195,15 @@ async fn background(state: Arc<Mutex<ClusterState>>) {
                 Message::VoteResponse(resp, res) => {
                     res.send(resp).ok();
                 }
+                Message::PreVoteRequest(req, res) => {
+                    let fut = node_actors[to.0 as usize].call_request_pre_vote(req);
+                    handle_message_response(to, from, state, fut, |resp| {
+                        Message::PreVoteResponse(resp, res)
+                    });
+                }
+                Message::PreVoteResponse(resp, res) => {
+                    res.send(resp).ok();
+                }
                 Message::AppendEntriesRequest(req, res) => {
                     let fut = node_actors[to.0 as usize].call_append_entries(req);
                     handle_message_response(to, from, state, fut, |resp| {

@@ -16,6 +16,8 @@ use crate::background::{DummyApp, DummyLogData, DummyState};
 pub enum Message {
     VoteRequest(VoteRequest, Sender<VoteResponse>),
     VoteResponse(VoteResponse, Sender<VoteResponse>),
+    PreVoteRequest(PreVoteRequest, Sender<PreVoteResponse>),
+    PreVoteResponse(PreVoteResponse, Sender<PreVoteResponse>),
     AppendEntriesRequest(
         AppendEntriesRequest<DummyApp>,
         Sender<AppendEntriesResponse>,
@@ -33,6 +35,8 @@ impl Message {
         match self {
             Self::VoteRequest(req, _) => format!("VoteRequest({})", req.candidate_id.0),
             Self::VoteResponse(req, _) => format!("VoteResponse({})", req.vote_granted),
+            Self::PreVoteRequest(req, _) => format!("PreVoteRequest({})", req.candidate_id.0),
+            Self::PreVoteResponse(req, _) => format!("PreVoteResponse({})", req.vote_granted),
             Self::AppendEntriesRequest(req, _) => format!(
                 "AppendEntriesRequest({}, {})",
                 req.prev_log_index.0,
