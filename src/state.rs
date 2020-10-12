@@ -4,8 +4,9 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use act_zero::Sender;
+use act_zero::*;
 use conrod_core::widget::Id;
+use futures::channel::oneshot;
 use raft_zero::messages::*;
 use raft_zero::*;
 use tokio::io::AsyncWrite;
@@ -14,17 +15,26 @@ use crate::background::{DummyApp, DummyLogData, DummyState};
 
 #[derive(Debug)]
 pub enum Message {
-    VoteRequest(VoteRequest, Sender<VoteResponse>),
-    VoteResponse(VoteResponse, Sender<VoteResponse>),
-    PreVoteRequest(PreVoteRequest, Sender<PreVoteResponse>),
-    PreVoteResponse(PreVoteResponse, Sender<PreVoteResponse>),
+    VoteRequest(VoteRequest, oneshot::Sender<Produces<VoteResponse>>),
+    VoteResponse(VoteResponse, oneshot::Sender<Produces<VoteResponse>>),
+    PreVoteRequest(PreVoteRequest, oneshot::Sender<Produces<PreVoteResponse>>),
+    PreVoteResponse(PreVoteResponse, oneshot::Sender<Produces<PreVoteResponse>>),
     AppendEntriesRequest(
         AppendEntriesRequest<DummyApp>,
-        Sender<AppendEntriesResponse>,
+        oneshot::Sender<Produces<AppendEntriesResponse>>,
     ),
-    AppendEntriesResponse(AppendEntriesResponse, Sender<AppendEntriesResponse>),
-    InstallSnapshotRequest(InstallSnapshotRequest, Sender<InstallSnapshotResponse>),
-    InstallSnapshotResponse(InstallSnapshotResponse, Sender<InstallSnapshotResponse>),
+    AppendEntriesResponse(
+        AppendEntriesResponse,
+        oneshot::Sender<Produces<AppendEntriesResponse>>,
+    ),
+    InstallSnapshotRequest(
+        InstallSnapshotRequest,
+        oneshot::Sender<Produces<InstallSnapshotResponse>>,
+    ),
+    InstallSnapshotResponse(
+        InstallSnapshotResponse,
+        oneshot::Sender<Produces<InstallSnapshotResponse>>,
+    ),
     ClientRequest(ClientRequest<DummyLogData>),
     SetMembers(SetMembersRequest),
     SetLearners(SetLearnersRequest),

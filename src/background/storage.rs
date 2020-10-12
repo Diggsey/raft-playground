@@ -3,10 +3,11 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use act_zero::*;
+use async_trait::async_trait;
 use raft_zero::messages::*;
 use raft_zero::{
     BoxAsyncRead, BoxAsyncWrite, HardState, LogIndex, LogRange, LogRangeOrSnapshot, LogState,
-    Snapshot, StorageImpl,
+    Snapshot, Storage,
 };
 
 use super::{DummyApp, DummyLogData, DummyLogResponse, DummyState};
@@ -36,28 +37,25 @@ impl DummyStorage {
     }
 }
 
-impl Actor for DummyStorage {
-    type Error = ();
-}
-#[act_zero]
+impl Actor for DummyStorage {}
+
+#[async_trait]
 impl Storage<DummyApp> for DummyStorage {
-    async fn init(&mut self, res: Sender<HardState>) {
-        res.send(HardState::default()).ok();
+    async fn init(&mut self) -> ActorResult<HardState> {
+        Produces::ok(HardState::default())
     }
-    async fn get_log_state(&mut self, res: Sender<LogState>) {
+    async fn get_log_state(&mut self) -> ActorResult<LogState> {
         let state = &mut self.state.lock().unwrap().nodes[self.index];
-        res.send(LogState {
+        Produces::ok(LogState {
             last_log_applied: state.applied,
             last_log_index: state.compacted + state.log.len() as u64 - 1,
             last_membership_applied: state.state.membership.clone(),
         })
-        .ok();
     }
     async fn get_log_range(
         &mut self,
         range: Range<LogIndex>,
-        res: Sender<LogRangeOrSnapshot<DummyLogData, usize>>,
-    ) {
+    ) -> ActorResult<LogRangeOrSnapshot<DummyLogData, usize>> {
         let state = &mut self.state.lock().unwrap().nodes[self.index];
         let result = if range.start <= state.compacted {
             LogRangeOrSnapshot::Snapshot(Snapshot {
@@ -87,30 +85,28 @@ impl Storage<DummyApp> for DummyStorage {
             })
         };
 
-        res.send(result).ok();
+        Produces::ok(result)
     }
     async fn append_entry_to_log(
         &mut self,
         entry: Arc<Entry<DummyLogData>>,
-        res: Sender<Result<(), ()>>,
-    ) {
+    ) -> ActorResult<Result<(), ()>> {
         let state = &mut self.state.lock().unwrap().nodes[self.index];
         state.log.push(entry);
-        res.send(Ok(())).ok();
+        Produces::ok(Ok(()))
     }
-    async fn replicate_to_log(&mut self, range: LogRange<DummyLogData>, res: Sender<()>) {
+    async fn replicate_to_log(&mut self, range: LogRange<DummyLogData>) -> ActorResult<()> {
         let state = &mut self.state.lock().unwrap().nodes[self.index];
         let expected_log_len = range.prev_log_index + 1 - state.compacted;
         state.log.truncate(expected_log_len as usize);
         state.log.extend(range.entries);
-        res.send(()).ok();
+        Produces::ok(())
     }
     async fn apply_to_state_machine(
         &mut self,
         index: LogIndex,
         entry: Arc<Entry<DummyLogData>>,
-        res: Sender<DummyLogResponse>,
-    ) {
+    ) -> ActorResult<DummyLogResponse> {
         let needs_compaction = {
             let state = &mut self.state.lock().unwrap().nodes[self.index];
             match &entry.payload {
@@ -130,15 +126,15 @@ impl Storage<DummyApp> for DummyStorage {
             self.compact_log().await;
         }
 
-        res.send(DummyLogResponse).ok();
+        Produces::ok(DummyLogResponse)
     }
-    async fn save_hard_state(&mut self, hs: HardState, res: Sender<()>) {
+    async fn save_hard_state(&mut self, hs: HardState) -> ActorResult<()> {
         let state = &mut self.state.lock().unwrap().nodes[self.index];
         state.hs = hs;
-        res.send(()).ok();
+        Produces::ok(())
     }
 
-    async fn install_snapshot(&self, snapshot: Snapshot<usize>, res: Sender<()>) {
+    async fn install_snapshot(&mut self, snapshot: Snapshot<usize>) -> ActorResult<()> {
         let state = &mut self.state.lock().unwrap().nodes[self.index];
         let snapshot_state: DummyState =
             serde_json::from_slice(state.snapshots[snapshot.id].as_deref().unwrap()).unwrap();
@@ -162,15 +158,15 @@ impl Storage<DummyApp> for DummyStorage {
         state.compacted = snapshot.last_log_index;
         state.current_snapshot = snapshot.id;
 
-        res.send(()).ok();
+        Produces::ok(())
     }
-    async fn create_snapshot(&self, res: Sender<(usize, BoxAsyncWrite)>) {
+    async fn create_snapshot(&mut self) -> ActorResult<(usize, BoxAsyncWrite)> {
         let writer = SnapshotWriter::new(self.state.clone(), self.index);
-        res.send((writer.id(), Box::pin(writer))).ok();
+        Produces::ok((writer.id(), Box::pin(writer)))
     }
-    async fn read_snapshot(&self, id: usize, res: Sender<BoxAsyncRead>) {
+    async fn read_snapshot(&mut self, id: usize) -> ActorResult<BoxAsyncRead> {
         let state = &mut self.state.lock().unwrap().nodes[self.index];
         let reader = Cursor::new(state.snapshots[id].clone().unwrap());
-        res.send(Box::pin(reader)).ok();
+        Produces::ok(Box::pin(reader))
     }
 }

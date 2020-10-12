@@ -18,6 +18,8 @@ use state::ClusterState;
 const CHANNEL_DELAY: f64 = 2.0;
 
 fn main() {
+    pretty_env_logger::init();
+
     const WIDTH: u32 = 800;
     const HEIGHT: u32 = 600;
 

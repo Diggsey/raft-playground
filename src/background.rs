@@ -3,8 +3,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use act_zero::runtimes::default::spawn_actor;
 use act_zero::*;
-use futures::task::{FutureObj, Spawn, SpawnError};
+use futures::channel::oneshot;
 use raft_zero::messages::*;
 use raft_zero::*;
 use serde::{Deserialize, Serialize};
@@ -18,19 +19,6 @@ mod storage;
 
 pub fn run(state: Arc<Mutex<ClusterState>>) {
     thread::spawn(|| background(state));
-}
-
-struct TokioSpawn;
-
-impl Spawn for TokioSpawn {
-    fn spawn_obj(&self, future: FutureObj<'static, ()>) -> Result<(), SpawnError> {
-        tokio::spawn(future);
-        Ok(())
-    }
-}
-
-fn spawn_actor<A: Actor>(actor: A) -> Addr<Local<A>> {
-    spawn(&TokioSpawn, actor).expect("TokioSpawn to be infallible")
 }
 
 #[derive(Debug, Clone)]
@@ -64,16 +52,14 @@ impl DummyApp {
         Self {
             node_id,
             config,
-            storage: spawn_actor(storage::DummyStorage::new(
+            storage: upcast!(spawn_actor(storage::DummyStorage::new(
                 node_id.0 as usize,
                 state.clone(),
-            ))
-            .upcast(),
-            observer: spawn_actor(observer::DummyObserver::new(
+            ))),
+            observer: upcast!(spawn_actor(observer::DummyObserver::new(
                 node_id.0 as usize,
                 state.clone(),
-            ))
-            .upcast(),
+            ))),
             state,
         }
     }
@@ -95,18 +81,17 @@ impl Application for DummyApp {
         self.observer.clone()
     }
     fn establish_connection(&mut self, node_id: NodeId) -> Addr<dyn Connection<Self>> {
-        spawn_actor(connection::DummyConnection::new(
+        upcast!(spawn_actor(connection::DummyConnection::new(
             self.node_id,
             node_id,
             self.state.clone(),
-        ))
-        .upcast()
+        )))
     }
 }
 
 fn handle_client_response(
     state: Arc<Mutex<ClusterState>>,
-    fut: impl Future<Output = Result<ClientResult<DummyApp>, Canceled>> + Send + 'static,
+    fut: impl Future<Output = Result<ClientResult<DummyApp>, oneshot::Canceled>> + Send + 'static,
 ) {
     tokio::spawn(async move {
         let resp = fut.await.ok();
@@ -118,7 +103,7 @@ fn handle_message_response<R>(
     to: NodeId,
     from: NodeId,
     state: Arc<Mutex<ClusterState>>,
-    fut: impl Future<Output = Result<R, Canceled>> + Send + 'static,
+    fut: impl Future<Output = Result<R, oneshot::Canceled>> + Send + 'static,
     f: impl FnOnce(R) -> Message + Send + 'static,
 ) {
     tokio::spawn(async move {
@@ -154,12 +139,12 @@ async fn background(state: Arc<Mutex<ClusterState>>) {
             .collect()
     };
 
-    let _ = node_actors[0].call_bootstrap_cluster(BootstrapRequest {
+    send!(node_actors[0].bootstrap_cluster(BootstrapRequest {
         members: (0..node_actors.len())
             .map(|index| NodeId(index as u64))
             .collect(),
         learners: Default::default(),
-    });
+    }));
 
     loop {
         delay_for(Duration::from_millis(50)).await;
@@ -187,51 +172,51 @@ async fn background(state: Arc<Mutex<ClusterState>>) {
 
             match msg {
                 Message::VoteRequest(req, res) => {
-                    let fut = node_actors[to.0 as usize].call_request_vote(req);
+                    let fut = call!(node_actors[to.0 as usize].request_vote(req));
                     handle_message_response(to, from, state, fut, |resp| {
                         Message::VoteResponse(resp, res)
                     });
                 }
                 Message::VoteResponse(resp, res) => {
-                    res.send(resp).ok();
+                    res.send(Produces::Value(resp)).ok();
                 }
                 Message::PreVoteRequest(req, res) => {
-                    let fut = node_actors[to.0 as usize].call_request_pre_vote(req);
+                    let fut = call!(node_actors[to.0 as usize].request_pre_vote(req));
                     handle_message_response(to, from, state, fut, |resp| {
                         Message::PreVoteResponse(resp, res)
                     });
                 }
                 Message::PreVoteResponse(resp, res) => {
-                    res.send(resp).ok();
+                    res.send(Produces::Value(resp)).ok();
                 }
                 Message::AppendEntriesRequest(req, res) => {
-                    let fut = node_actors[to.0 as usize].call_append_entries(req);
+                    let fut = call!(node_actors[to.0 as usize].append_entries(req));
                     handle_message_response(to, from, state, fut, |resp| {
                         Message::AppendEntriesResponse(resp, res)
                     });
                 }
                 Message::AppendEntriesResponse(resp, res) => {
-                    res.send(resp).ok();
+                    res.send(Produces::Value(resp)).ok();
                 }
                 Message::InstallSnapshotRequest(req, res) => {
-                    let fut = node_actors[to.0 as usize].call_install_snapshot(req);
+                    let fut = call!(node_actors[to.0 as usize].install_snapshot(req));
                     handle_message_response(to, from, state, fut, |resp| {
                         Message::InstallSnapshotResponse(resp, res)
                     });
                 }
                 Message::InstallSnapshotResponse(resp, res) => {
-                    res.send(resp).ok();
+                    res.send(Produces::Value(resp)).ok();
                 }
                 Message::ClientRequest(req) => {
-                    let fut = node_actors[to.0 as usize].call_client_request(req);
+                    let fut = call!(node_actors[to.0 as usize].client_request(req));
                     handle_client_response(state, fut);
                 }
                 Message::SetLearners(req) => {
-                    let fut = node_actors[to.0 as usize].call_set_learners(req);
+                    let fut = call!(node_actors[to.0 as usize].set_learners(req));
                     handle_client_response(state, fut);
                 }
                 Message::SetMembers(req) => {
-                    let fut = node_actors[to.0 as usize].call_set_members(req);
+                    let fut = call!(node_actors[to.0 as usize].set_members(req));
                     handle_client_response(state, fut);
                 }
             }
